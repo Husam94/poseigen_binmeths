@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(-1, '/mnt/x/Computation/ocu/utilities')
-
 import numpy as np
 import pandas as pd
 import math
@@ -9,10 +6,7 @@ import itertools
 
 from collections import Counter
 
-import torch
-import torch.nn as nn
-
-import ocu_seaside.ocu_basics as se
+import poseigen_seaside.basics as se
 
 
 def BinParser(inp, uni, categorical = False, multi = False): 

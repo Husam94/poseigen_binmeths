@@ -4,16 +4,13 @@
 
 requires = ["setuptools", 
 			"numpy", 
-			"pandas", 
-			"matplotlib", 
-			"denseweight", 
-			"tqdm", 
-      "torch"
+			"pandas",
+      "poseigen_seaside"			
 			]
 
 [project]
 
-name = "poseigen_seaside"
+name = "poseigen_binmeths"
 
 version = "0.0.1" 
 
@@ -50,12 +47,11 @@ classifiers = [
   
 ]
 
-dependencies = ["numpy", 
-				"pandas", 
-				"matplotlib", 
-				"denseweight", 
-				"tqdm", 
-        "torch"]
+dependencies = [
+  "numpy",
+  "pandas",
+  "poseigen_seaside"
+  ]
 
 [project.urls]
-"Homepage" = "https://github.com/husam94/poseigen_seaside"
+"Homepage" = "https://github.com/husam94/poseigen_binmeths"
