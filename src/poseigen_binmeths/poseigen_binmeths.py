@@ -8,6 +8,18 @@ from collections import Counter
 
 import poseigen_seaside.basics as se
 
+import poseigen_seaside.metrics as mex
+
+from scipy.interpolate import interp1d
+
+import concurrent.futures
+
+
+
+
+
+#---------------------------------------------------------------------------------------
+
 
 def BinParser(inp, uni, categorical = False, multi = False): 
     
@@ -24,31 +36,52 @@ def BinParser(inp, uni, categorical = False, multi = False):
     return pars
 
 
-def Binner(inp, uni = None): 
-
-    #This is Binner_v2 in origninal binstuff. 
-    
-    #should be able to handle a multi-dim shape, bin it and return 
-    categorical = False
-    if isinstance(inp[0], str): categorical = True
-    
+def Binner(inp, uni=None, open_ends=False):
+    """
+    Fast binning with optional open ends.
+    If open_ends=True, values below the lowest bin go to bin 0,
+    values above the highest bin go to the last bin.
+    """
+    inp = np.asarray(inp)
+    categorical = isinstance(inp.flat[0], str)
     inpy = inp.reshape(-1)
-    
-    par = BinParser(inpy, uni, categorical = categorical)
-    
-    inpx = np.zeros(len(inpy), dtype = int)
-    for ip, p in enumerate(par): 
-        inpx[p] = ip
-    
+    inpx = np.zeros(len(inpy), dtype=int)
+
+    if categorical:
+        par = BinParser(inpy, uni, categorical=True)
+        for ip, p in enumerate(par):
+            inpx[p] = ip
+    else:
+        uni = np.asarray(uni)
+        starts = uni[:, 0]
+        ends = uni[:, 1]
+        # Find which bin each value belongs to
+        idx = np.searchsorted(starts, inpy, side='right') - 1
+        # Mask for values within bin ranges
+        valid = (idx >= 0) & (inpy <= ends[idx])
+        inpx[valid] = idx[valid]
+        if open_ends:
+            # Values below lowest bin
+            inpx[inpy < starts[0]] = 0
+            # Values above highest bin
+            inpx[inpy > ends[-1]] = len(uni) - 1
+        # Otherwise, out-of-range values remain 0
+
     inpx = inpx.reshape(inp.shape)
-    
-    return inpx 
+    return inpx
 
 def HistUni(inp, bins = 10): 
     inp = np.array(inp)
     bin_edges = np.linspace(inp.min(), inp.max(), bins + 1)
     uni = se.ListWindower(bin_edges, win_size = 2)
-    return uni
+    return np.array(uni)
+
+
+def UniProp(uni): 
+    startoz, endoz = uni.T
+    mino, maxo = startoz.min(), endoz.max()
+    diffs = endoz - startoz
+    return diffs / (maxo - mino)
 
 
 def HistBinning(inp, bins = 10):
@@ -130,6 +163,7 @@ def Harpoon(bind, select,
     return idx[0] if repeat == 1 else idx
 
 
+
 def BinFunc(inp, bind, uni = None,  
             mode = [np.mean, {}]):
     
@@ -160,28 +194,202 @@ def BinsOfBins(bind, uni = None):
 
 
 
-def BinCount(bind, uni = None, multi = False, prop = False):
-    #uni is shared
-    #inp is a list of 1D arrays or lists of values
+# def BinCount(bind, uni = None, multi = False, prop = False):
+#     #uni is shared
+#     #inp is a list of 1D arrays or lists of values
 
-    if multi is False: bind = [bind]
-    bind = [np.array(m) for m in bind]
+#     if multi is False: bind = [bind]
+#     bind = [np.array(m) for m in bind]
     
-    if uni is None: uni = np.sort(np.unique(bind))
+#     if uni is None: uni = np.sort(np.unique(bind))
 
-    hs = [Counter(m.reshape(-1)) for m in bind]
-    max_key = max(max(d) for d in hs)
-    empty = dict.fromkeys(uni, 0)
-    rere = [{**empty, **d} for d in hs]
+#     hs = [Counter(m.reshape(-1)) for m in bind]
+#     max_key = max(max(d) for d in hs)
+#     empty = dict.fromkeys(uni, 0)
+#     rere = [{**empty, **d} for d in hs]
 
-    cnv = pd.DataFrame(rere).to_numpy()
+#     cnv = pd.DataFrame(rere).to_numpy()
 
-    if multi is False: cnv = cnv[0] 
+#     if multi is False: cnv = cnv[0] 
 
-    if prop: cnv = cnv / np.sum(cnv)
+#     if prop: cnv = cnv / np.sum(cnv)
     
-    return cnv
+#     return cnv
 
+
+
+# def BinCount(bind, uni = None, multi = False, prop = False, bin_sizes = None):
+#     #uni is shared
+#     #inp is a list of 1D arrays or lists of values
+
+#     if multi is False: bind = [bind]
+#     bind = [np.array(m) for m in bind]
+#     uni = [uni]
+#     bin_sizes = [bin_sizes]
+
+#     cnvs = []
+#     for binx, unix, bsx, in zip(bind, uni, bin_sizes): 
+#         if unix is None: unix = np.sort(np.unique(binx))
+#         hs = Counter(binx.reshape(-1))
+#         max_key = max(hs)
+#         empty = dict.fromkeys(unix, 0)
+#         rere = {**empty, **hs}
+#         cnv = pd.DataFrame(rere).to_numpy()
+#         if prop is not None: cnv = cnv / np.sum(cnv)
+#         if bsx is not None: 
+#             bsx = np.array(bsx)
+#             bsx = bsx / np.sum(bsx)
+#             cnv = cnv / bsx
+#         cnvs.append(cnv)
+    
+#     if multi is False: cnvs = cnvs[0]
+
+#     return cnvs
+
+def BinCount(bind, uni=None, multi=False, prop=False, bin_sizes=None):
+    """
+    Efficient bin counting with optional density scaling.
+    Supports different uni and bin_sizes for each bind when multi=True.
+    """
+    if not multi:
+        # Single array mode
+        binx = np.asarray(bind).reshape(-1)
+        unix = np.sort(np.unique(binx)) if uni is None else np.asarray(uni)
+        idx = np.searchsorted(unix, binx)
+        valid = (idx < len(unix)) & (unix[idx] == binx)
+        counts = np.bincount(idx[valid], minlength=len(unix)).astype(float)
+        if prop:
+            s = counts.sum()
+            if s > 0:
+                counts = counts / s
+        if bin_sizes is not None:
+            bsx = np.asarray(bin_sizes, dtype=float)
+            bsx = bsx / bsx.sum() if bsx.sum() > 0 else bsx
+            counts = counts / bsx
+        return counts
+    else:
+        # Multi mode: bind, uni, bin_sizes should be lists of same length
+        cnvs = []
+        for i, binx in enumerate(bind):
+            unix = np.sort(np.unique(binx)) if (uni is None or uni[i] is None) else np.asarray(uni[i])
+            binx = np.asarray(binx).reshape(-1)
+            idx = np.searchsorted(unix, binx)
+            valid = (idx < len(unix)) & (unix[idx] == binx)
+            counts = np.bincount(idx[valid], minlength=len(unix)).astype(float)
+            if prop:
+                s = counts.sum()
+                if s > 0:
+                    counts = counts / s
+            if bin_sizes is not None and bin_sizes[i] is not None:
+                bsx = np.asarray(bin_sizes[i], dtype=float)
+                bsx = bsx / bsx.sum() if bsx.sum() > 0 else bsx
+                counts = counts / bsx
+            cnvs.append(counts)
+        return cnvs
+
+
+def BinDensity(bind, uni, raw = False):
+    
+    """
+    Slides across inp1, counts the number of observations in each window,
+    scales by the total number of observations, and fits a linear interpolation.
+    Returns the interpolation object: winden.predict(x)
+    """
+
+    startoz, endoz = uni.T
+    centers = (endoz + startoz) / 2
+
+    counts = BinCount(bind)
+    counts = np.array(counts)
+
+    densities = counts if raw else  counts / len(bind)
+    winden = interp1d(centers, densities, kind='linear', bounds_error=False, 
+                      fill_value=(densities[0], densities[-1]))
+    winden.predict = winden.__call__  # For API consistency
+
+    return winden
+
+
+
+def BinSelect(bind, weights = None, select = 0.1): 
+    """
+    Weighted random sampling from bins without replacement.
+    
+    Parameters:
+    -----------
+    bind : array-like
+        1D array of bin labels (integers)
+    weights : array-like, optional
+        Corresponding weights for each observation. If None, uniform weights.
+    select : float, int, or list
+        - Single int: number of observations to select per bin
+        - Single float < 1: proportion of observations to select per bin
+        - List: per-bin selection (int or float < 1 for each bin)
+    
+    Returns:
+    --------
+    selected_indices : ndarray
+        Indices of selected observations
+    """
+    bind = np.asarray(bind).reshape(-1)
+    N = len(bind)
+    
+    if weights is None:
+        weights = np.ones(N)
+    else:
+        weights = np.asarray(weights).reshape(-1)
+    
+    uni = np.unique(bind)
+    num_bins = len(uni)
+    
+    # Parse select parameter
+    if not isinstance(select, (list, np.ndarray)):
+        select = np.full(num_bins, select)
+    else:
+        select = np.asarray(select)
+        if len(select) != num_bins:
+            raise ValueError(f"select list length ({len(select)}) must match number of bins ({num_bins})")
+    
+    selected_indices = []
+    
+    for bin_idx, bin_label in enumerate(uni):
+        # Get indices for this bin
+        bin_mask = (bind == bin_label)
+        bin_indices = np.flatnonzero(bin_mask)
+        n_available = len(bin_indices)
+        
+        if n_available == 0:
+            continue
+        
+        # Determine number to select
+        n_select = select[bin_idx]
+        if n_select < 1:
+            # Proportion
+            n_select = int(np.round(n_available * n_select))
+        else:
+            # Absolute count
+            n_select = int(n_select)
+        
+        # Check if we have enough observations
+        if n_select > n_available:
+            print('Less than wanted')
+            selected_indices.append(bin_indices)
+        elif n_select > 0:
+            # Normalize weights for this bin
+            bin_weights = weights[bin_mask]
+            bin_weights_norm = bin_weights / bin_weights.sum()
+            
+            # Weighted random sampling without replacement
+            chosen = np.random.choice(bin_indices, size=n_select, replace=False, p=bin_weights_norm)
+            selected_indices.append(chosen)
+    
+    # Concatenate all selected indices
+    if len(selected_indices) > 0:
+        selected_indices = np.concatenate(selected_indices)
+    else:
+        selected_indices = np.array([], dtype=int)
+    
+    return selected_indices
 
 
 ################## OBJECTIVE BINNING ##################################
@@ -341,12 +549,45 @@ def FindNumBins(inp,
 
 
 
+# def ObjUni(inp, scalefactor, 
+#            mode = [se.tanh, {}], mode_rev = [se.revtanh, {}], 
+#                   bins = 10, 
+#                   open_ends = False, 
+#                   mima = None, lowerbound = None, upperbound = None):
+    
+#     inpx = inp.reshape(-1) 
+
+#     if mima is None: mi, ma = None, None
+#     elif isinstance(mima, int): mi, ma = (0, int)
+#     else: mi, ma = mima
+
+#     if mi is None: mi = np.min(inp)
+#     if ma is None: ma = np.max(inp)
+
+#     lb = mi if lowerbound is None else lowerbound
+#     ub = ma if upperbound is None else upperbound
+
+#     inpx = inp.reshape(-1)
+#     inpx[inpx < lb] = lb
+#     inpx[inpx > ub] = ub
+
+#     liny = mode[0](scalefactor * inpx, **mode[1])
+
+#     hist, bin_edges = np.histogram(liny, bins = bins, density=False)
+
+#     rt = mode_rev[0](bin_edges, **mode_rev[1]) / scalefactor
+
+#     rt[0] = mi
+#     rt[-1] = ma
+
+#     return np.array(se.ListWindower(rt, win_size = 2))
+
 def ObjUni(inp, scalefactor, 
            mode = [se.tanh, {}], mode_rev = [se.revtanh, {}], 
-                  bins = 10, 
-                  open_ends = False, 
-                  mima = None, lowerbound = None, upperbound = None):
-    
+           bins = 10, 
+           open_ends = False, 
+           mima = None, lowerbound = None, upperbound = None):
+
     inpx = inp.reshape(-1) 
 
     if mima is None: mi, ma = None, None
@@ -363,16 +604,219 @@ def ObjUni(inp, scalefactor,
     inpx[inpx < lb] = lb
     inpx[inpx > ub] = ub
 
-    liny = mode[0](scalefactor * inpx, **mode[1])
+    # If scalefactor is nan, skip scaling and transformation
+    if np.isnan(scalefactor):
+        liny = inpx
+        bin_edges = np.linspace(lb, ub, bins + 1)
+    else:
+        liny = mode[0](scalefactor * inpx, **mode[1])
+        bin_edges = None  # Will be set by np.histogram below
 
-    hist, bin_edges = np.histogram(liny, bins = bins, density=False)
+    hist, bin_edges = np.histogram(liny, bins=bins, density=False) if bin_edges is None else np.histogram(liny, bins=bin_edges, density=False)
 
-    rt = mode_rev[0](bin_edges, **mode_rev[1]) / scalefactor
+    if np.isnan(scalefactor):
+        rt = bin_edges
+    else:
+        rt = mode_rev[0](bin_edges, **mode_rev[1]) / scalefactor
 
     rt[0] = mi
     rt[-1] = ma
 
-    return se.ListWindower(rt, win_size = 2)
+    return np.array(se.ListWindower(rt, win_size=2))
+
+
+
+
+# def BinOpt(inp,
+#            mode = [se.tanh, {}], mode_rev = [se.revtanh, {}], 
+#            obs_min = 10,
+#            bins_min = 5, bins_max = 50, bins_increm = 5,
+#            scalefax_min = 1, scalefax_increm = 0.1, scalefax_max = 50): 
+
+#     bins_num_range = np.arange(bins_min, bins_max + 1, bins_increm)[::-1]
+#     scalefax_range = np.arange(scalefax_min, scalefax_max, scalefax_increm)
+#     inpx = inp.reshape(-1)
+
+#     def eval_bin_scalefax(args):
+#         bins_num, scalefax = args
+#         liny = mode[0](scalefax * inpx, **mode[1])
+#         hist, _ = np.histogram(liny, bins=bins_num, density=False)
+#         mino_obs = np.min(hist)
+#         return (bins_num, scalefax, mino_obs)
+
+#     combos = [(bins_num, scalefax) for bins_num in bins_num_range for scalefax in scalefax_range]
+#     results = []
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         for res in executor.map(eval_bin_scalefax, combos):
+#             results.append(res)
+
+#     # Sort by bins_num descending, scalefax ascending
+#     results = sorted(results, key=lambda x: (-x[0], x[1]))
+
+#     for bins_num in bins_num_range:
+#         candidates = [r for r in results if r[0] == bins_num and r[2] >= obs_min]
+#         if candidates:
+#             best = min(candidates, key=lambda x: x[1])
+#             return best[0], best[1]
+
+#     print('Not Possible')
+#     return None
+
+
+
+# def BinOpt(inp,
+#            mode = [se.tanh, {}],
+#            obs_min = 10,
+#            bins_min = 5, bins_max = 50, bins_increm = 5,
+#            scalefax_min = 1, scalefax_increm = 0.1, scalefax_max = 50): 
+
+#     bins_num_range = np.arange(bins_min, bins_max + 1, bins_increm)[::-1]
+#     scalefax_range = np.arange(scalefax_min, scalefax_max, scalefax_increm)
+#     inpx = inp.reshape(-1)
+
+#     def eval_scalefax(scalefax, bins_num):
+        
+#         if mode is not None: liny = mode[0](scalefax * inpx, **mode[1])
+#         else: liny = inpx
+
+#         hist, _ = np.histogram(liny, bins=bins_num, density=False)
+#         mino_obs = np.min(hist)
+#         return scalefax, mino_obs
+
+#     for bins_num in bins_num_range:
+#         with concurrent.futures.ThreadPoolExecutor() as executor:
+#             results = list(executor.map(lambda s: eval_scalefax(s, bins_num), scalefax_range))
+#         # Find the smallest scalefax that satisfies obs_min
+#         candidates = [(s, m) for s, m in results if m >= obs_min]
+#         if candidates:
+#             best_scalefax = min(candidates, key=lambda x: x[0])[0]
+#             return bins_num, best_scalefax
+
+#     print('Not Possible')
+#     return None
+
+
+# def BinOpt(inp,
+#            mode = [se.tanh, {}],
+#            obs_min = 10,
+#            bins_min = 5, bins_max = 50, bins_increm = 5,
+#            scalefax_min = 1, scalefax_increm = 0.1, scalefax_max = 50):
+
+#     inpx = inp.reshape(-1)
+#     bins_num_range = np.arange(bins_min, bins_max + 1, bins_increm)
+
+#     # Step 1: Try normal scale (scalefax=1) first
+#     def eval_bins_num_normal(bins_num):
+#         liny = inpx
+#         hist, _ = np.histogram(liny, bins=bins_num, density=False)
+#         mino_obs = np.min(hist)
+#         return bins_num, mino_obs
+
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         results = list(executor.map(eval_bins_num_normal, bins_num_range))
+#     valid_bins = [b for b, m in results if m >= obs_min]
+
+#     if valid_bins:
+#         max_bins_num = max(valid_bins)
+#         return max_bins_num, np.nan  # No scaling needed
+
+#     # Step 2: If normal scale fails, proceed to scaling
+#     scalefax_range = np.arange(scalefax_min, scalefax_max, scalefax_increm)
+
+#     def eval_scalefax(scalefax):
+#         if mode is not None:
+#             liny = mode[0](scalefax * inpx, **mode[1])
+#         else:
+#             liny = inpx
+#         hist, _ = np.histogram(liny, bins=bins_min, density=False)
+#         mino_obs = np.min(hist)
+#         return scalefax, mino_obs
+
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         results = list(executor.map(eval_scalefax, scalefax_range))
+#     candidates = [(s, m) for s, m in results if m >= obs_min]
+#     if not candidates:
+#         print('Not Possible')
+#         return None
+
+#     best_scalefax = min(candidates, key=lambda x: x[0])[0]
+
+#     def eval_bins_num_scaled(bins_num):
+#         if mode is not None:
+#             liny = mode[0](best_scalefax * inpx, **mode[1])
+#         else:
+#             liny = inpx
+#         hist, _ = np.histogram(liny, bins=bins_num, density=False)
+#         mino_obs = np.min(hist)
+#         return bins_num, mino_obs
+
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         results = list(executor.map(eval_bins_num_scaled, bins_num_range))
+#     valid_bins = [b for b, m in results if m >= obs_min]
+#     if not valid_bins:
+#         print('Not Possible')
+#         return None
+
+#     max_bins_num = max(valid_bins)
+#     return max_bins_num, best_scalefax
+
+
+
+
+def BinOpt(inp,
+           mode = [se.tanh, {}],
+           obs_min = 10,
+           bins_min = 5, bins_max = 50, bins_increm = 5,
+           scalefax_min = 1, scalefax_increm = 0.1, scalefax_max = 50, 
+           geometric = False):
+
+    inpx = inp.reshape(-1)
+    bins_num_range = np.arange(bins_max, bins_min - 1, -bins_increm)
+
+    for bins_num in bins_num_range:
+        # Try normal scale first
+        liny = inpx
+        hist, _ = np.histogram(liny, bins=bins_num, density=False)
+        mino_obs = np.min(hist)
+        if mino_obs >= obs_min:
+            return bins_num, np.nan  # No scaling needed
+        
+
+
+        # Try scaling if normal scale fails
+        scalefax_range = np.arange(scalefax_min, scalefax_max, scalefax_increm)
+        def eval_scalefax(scalefax):
+            if geometric: 
+                bin_ranges = se.ListWindower(se.GeomNumSpacing(np.min(inpx), np.max(inpx), bins_num + 1, scalefax), 2)
+                bind = Binner(inpx, bin_ranges)
+                bc = BinCount(bind)
+                print(bc)
+                mino_obs = np.min(bc)
+
+            else: 
+                liny = mode[0](scalefax * inpx, **mode[1])
+                hist, _ = np.histogram(liny, bins=bins_num, density=False)
+                mino_obs = np.min(hist)
+            return scalefax, mino_obs
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = list(executor.map(eval_scalefax, scalefax_range))
+        candidates = [(s, m) for s, m in results if m >= obs_min]
+        if candidates:
+            best_scalefax = min(candidates, key=lambda x: x[0])[0]
+            return bins_num, best_scalefax
+
+    print('Not Possible')
+    return None
+
+
+            
+
+
+
+
+
+     
 
 
 
@@ -380,16 +824,70 @@ def ObjUni(inp, scalefactor,
 
 
 
+    inpx = inp.reshape(-1) 
+
+    if mima is None: mi, ma = None, None
+    elif isinstance(mima, int): mi, ma = (0, int)
+    else: mi, ma = mima
+
+    if mi is None: mi = np.min(inp)
+    if ma is None: ma = np.max(inp)
+
+    lb = mi if lowerbound is None else lowerbound
+    ub = ma if upperbound is None else upperbound
+
+    inpx = inp.reshape(-1)
+    inpx[inpx < lb] = lb
+    inpx[inpx > ub] = ub
+
+    cent1 = None
+
+    totz = ma - mi 
+
+    starto = start - increm
+
+    vars, scalefactors, edges, hix = [], [], [], []
+
+    if maxrange is None: maxrange = 1
+    if minobs is None: minobs = len(inp) 
+
+    lenz_max, mino_obs = 0, 0
+    
+    while lenz_max <= maxrange and mino_obs <= minobs:
+
+        starto = np.round(starto + increm, 5)
+
+        if cent1 is None:
+
+            liny = mode[0](starto * inpx, **mode[1])
+
+            hist, bin_edges = np.histogram(liny, bins = bins, density=False)
+
+            mino_obs = np.min(hist)
+
+            rt = mode_rev[0](bin_edges, ** mode_rev[1]) / starto
+
+            lens_props = np.array([rt[i+1] - rt[i] for i in np.arange(len(rt) -1)]) / totz
+            lenz_max = np.max(lens_props)
+
+            rt[0] = mi
+            rt[-1] = ma
+
+            hix.append(hist)
+            edges.append(rt)
+            vars.append(np.std(hist))
+            scalefactors.append(starto)
+        
+    
+    besto = np.argmin(vars)
+    #print(besto, vars[besto], edges[besto], hix[besto])
+
+    return scalefactors[besto]
 
 
 
 
-###########################################################
-
-############# SPLIT TOOLS ####################
-
-
-
+#====================================== SPLIT TOOLS ======================================
 
 
 def SplitExpander(X1, X2, Split, ma = None):
@@ -495,6 +993,8 @@ def SplitGen_Random(X, num_splits = 1, proportions = [0.7, 0.3], group = None):
     if num_splits == 1: Splits = Splits[0]
     
     return Splits
+
+
 
 def SplitGen_Window(X, num_splits = 3, 
                     proportions = [0.7, 0.3],
@@ -757,114 +1257,439 @@ def SubSample_Akin(bind,
 
 
 
-
-def SimpleStratifiedSplit(obs_bind, props = [0.5, 0.25, 0.25], prints = False): 
+def SimpleStratifiedSplit(obs_bind, props=[0.5, 0.25, 0.25], prints=False, random=False):
+    
+    obs_bind = np.asarray(obs_bind).reshape(-1)
     uni = np.unique(obs_bind)
     props = np.array(props)
     props = props / np.sum(props)
+    lpx = len(props)
+    splits = [[] for _ in range(lpx)]
 
-    lpx = np.arange(len(props))
-
-    splito = {ipo: [] for ipo in lpx}
-
-    for unx in uni: 
+    for unx in uni:
         idxs = np.where(obs_bind == unx)[0]
-        dd = np.random.choice(lpx, size = len(idxs), p = props, replace = True)
-        for ipo in lpx: splito[ipo].append(idxs[dd == ipo])
-    
-    splito = [np.concatenate(splito[ipo]) for ipo in lpx]
+        n = len(idxs)
 
-    if prints: print([BinCount(obs_bind[s], uni = uni) for s in splito])
+        # Base sizes
+        sizes = np.floor(props * n).astype(int)
 
-    return splito
+        # Remainder
+        remainder = n - np.sum(sizes)
+
+        if remainder > 0:
+            if random:
+                # Randomly choose which splits get the extra observations
+                extra_bins = np.random.choice(lpx, size=remainder, replace=False)
+                for b in extra_bins:
+                    sizes[b] += 1
+            else:
+                # Original behavior: allocate to first splits
+                sizes[:remainder] += 1
+
+        # Shuffle and split indices
+        np.random.shuffle(idxs)
+        cs = np.cumsum(sizes)
+        split_idxs = np.split(idxs, cs[:-1])
+
+        for i, s in enumerate(split_idxs):
+            splits[i].append(s)
+
+    # Concatenate splits for all classes
+    splits = [np.concatenate(s) if len(s) > 0 else np.array([], dtype=int) for s in splits]
+
+    if prints:
+        print([BinCount(obs_bind[s], uni=uni) for s in splits])
+
+    return splits
 
 
 
-class BinWeights: 
 
-    def __init__(self, uni = None, multi = False, minus = True, newrange = True):
+# class BinWeights: 
 
-        self.uni = uni
-        self.multi = multi
-        self.minus = minus
-        self.newrange = newrange
+#     def __init__(self, uni = None, multi = False, minus = True, newrange = True):
+
+#         self.uni = uni
+#         self.multi = multi
+#         self.minus = minus
+#         self.newrange = newrange
         
-    def fit(self, bind): 
+#     def fit(self, bind): 
 
-        multi = self.multi
-        uni = self.uni
-        minus = self.minus
-        newrange = self.newrange
+#         multi = self.multi
+#         uni = self.uni
+#         minus = self.minus
+#         newrange = self.newrange
 
-        if multi is False: bind = [bind]
+#         if multi is False: bind = [bind]
 
-        all_weights, unis = [], []
-        for bindx in bind: 
+#         all_weights, unis = [], []
+#         for bindx in bind: 
 
-            if uni is None: uni = np.sort(np.unique(bindx))
-            unis.append(uni)
-            cnv = BinCount(bindx, uni = uni, multi = False)
-            cnv_prop = cnv / np.sum(cnv)
+#             if uni is None: uni = np.sort(np.unique(bindx))
+#             unis.append(uni)
+#             cnv = BinCount(bindx, uni = uni, multi = False)
+#             cnv_prop = cnv / np.sum(cnv)
 
-            weights = 1 - cnv_prop if minus else 1 / cnv_prop
+#             weights = 1 - cnv_prop if minus else 1 / cnv_prop
             
-            if newrange is not None: 
-                mi, ma = se.MiMa(weights) 
-                if isinstance(newrange, tuple): 
+#             if newrange is not None: 
+#                 mi, ma = se.MiMa(weights) 
+#                 if isinstance(newrange, tuple): 
 
-                    newmi, newma = newrange
-                    weights = (((weights - mi) * (newma - newmi)) / (ma - mi)) + newmi
+#                     newmi, newma = newrange
+#                     weights = (((weights - mi) * (newma - newmi)) / (ma - mi)) + newmi
                 
-                elif newrange is True: 
-                    weights = weights / ma
+#                 elif newrange is True: 
+#                     weights = weights / ma
             
-            all_weights.append(weights)
+#             all_weights.append(weights)
         
-        self.all_weights = all_weights
-        self.unis = unis
+#         self.all_weights = all_weights
+#         self.unis = unis
     
-        return self
+#         return self
     
-    def eval(self, inp, dtype = np.float32):
+#     def eval(self, inp, dtype = np.float32):
          
-        if self.multi is False: inp = [inp]
+#         if self.multi is False: inp = [inp]
 
-        new_weights = []
+#         new_weights = []
 
-        for inpx, weights, uni in zip(inp, self.all_weights, self.unis):
-            weix = np.zeros(inpx.shape, dtype = dtype)
-            for u,w in zip(uni, weights): weix[inpx == u] = w
-            new_weights.append(weix)
+#         for inpx, weights, uni in zip(inp, self.all_weights, self.unis):
+#             weix = np.zeros(inpx.shape, dtype = dtype)
+#             for u,w in zip(uni, weights): weix[inpx == u] = w
+#             new_weights.append(weix)
             
-        new_weights = np.stack(new_weights) if self.multi else new_weights[0]
+#         new_weights = np.stack(new_weights) if self.multi else new_weights[0]
         
-        return new_weights
+#         return new_weights
 
 
-def BinWeighter(bind, onlyidx = None, byaxis = None, 
-                uni = None, minus = True, newrange = True,
-                dtype = np.float32):
+# def BinWeighter(bind, onlyidx = None, byaxis = None, 
+#                 uni = None, minus = True, newrange = True,
+#                 dtype = np.float32):
     
-    bind = np.array(bind) #just in case
+#     bind = np.array(bind) #just in case
     
-    origshape = bind.shape
+#     origshape = bind.shape
 
-    inps = [bind] if byaxis is None else [bind.take(indices=a, axis=byaxis) for a in range(origshape[byaxis])]
+#     inps = [bind] if byaxis is None else [bind.take(indices=a, axis=byaxis) for a in range(origshape[byaxis])]
 
-    inpshape = inps[0].shape
+#     inpshape = inps[0].shape
 
-    newei = []
+#     newei = []
 
-    for j in inps: 
-        bine = j if onlyidx is None else j[onlyidx]
+#     for j in inps: 
+#         bine = j if onlyidx is None else j[onlyidx]
 
-        bw = BinWeights(uni = uni, multi = False, minus = minus, newrange = newrange).fit(bind = bine.reshape(-1))
-        wo = bw.eval(j.reshape(-1), dtype=dtype).reshape(inpshape)
-        newei.append(wo)
+#         bw = BinWeights(uni = uni, multi = False, minus = minus, newrange = newrange).fit(bind = bine.reshape(-1))
+#         wo = bw.eval(j.reshape(-1), dtype=dtype).reshape(inpshape)
+#         newei.append(wo)
     
-    newei = np.stack(newei, axis = byaxis) if byaxis else newei[0] 
+#     newei = np.stack(newei, axis = byaxis) if byaxis else newei[0] 
     
-    return newei
+#     return newei
+
+
+
+def absrel_weighted(a, b, w, eps = 1e-12): 
+    '''(abs(b-a) / a)'''
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    
+    return np.mean(w * (np.abs(b-a) / (a+eps)))
+
+
+
+def BinWeights(inp, bin_sizes=None, mode=[se.Reciprocal, {}]):
+    """
+    Efficiently computes weights for each observation based on bin membership.
+    Supports multi-dimensional inp and bin_sizes with np.nan fillers.
+    Ensures output weights have the same shape as inp.
+    """
+
+    orig_shape = np.shape(inp)
+    inp = np.squeeze(inp)
+
+    if mode is None:
+        weights = np.ones_like(inp, dtype=float)
+        weights /= weights.size
+        weights = weights.reshape(inp.shape)
+        if weights.shape != orig_shape:
+            weights = weights.reshape(orig_shape)
+        return weights
+
+    if isinstance(mode, str): 
+        if mode == 'recip': mode = [se.Reciprocal, {}]
+        if mode == 'comp': mode = [se.Complement, {}]
+
+    if bin_sizes is not None:
+        bin_sizes = np.squeeze(bin_sizes)
+    inp_shape = inp.shape
+
+    # Always work with 2D: (N, G)
+    if inp.ndim == 1:
+        inp = inp.reshape(-1, 1)
+    if bin_sizes is not None and bin_sizes.ndim == 1:
+        bin_sizes = bin_sizes.reshape(-1, 1)
+
+    N, G = inp.shape
+    weights_all = np.empty_like(inp, dtype=float)
+
+    for g in range(G):
+        inp_sel = inp[:, g]
+        if bin_sizes is not None:
+            bin_sizes_sel = bin_sizes[:, g] if bin_sizes.shape[1] > 1 else bin_sizes[:, 0]
+            valid_bins = ~np.isnan(bin_sizes_sel)
+            bin_labels = np.arange(len(bin_sizes_sel))[valid_bins]
+        else:
+            bin_labels = np.unique(inp_sel)
+            bin_sizes_sel = None
+
+        # Map inp_sel to 0-based indices in bin_labels
+        sort_idx = np.argsort(bin_labels)
+        sorted_bins = bin_labels[sort_idx]
+        bin_indices = np.searchsorted(sorted_bins, inp_sel)
+        in_range = (bin_indices < len(sorted_bins)) & (sorted_bins[bin_indices] == inp_sel)
+        mapped_indices = np.full_like(bin_indices, -1)
+        mapped_indices[in_range] = bin_indices[in_range]
+
+        valid_mask = mapped_indices >= 0
+        bincounts = np.bincount(mapped_indices[valid_mask], minlength=len(bin_labels))
+
+        if bin_sizes_sel is not None and not np.any(np.isnan(bin_sizes_sel)):
+            bincounts = bincounts / bin_sizes_sel[valid_bins]
+
+        bin_weights = mode[0](bincounts / np.sum(bincounts), **mode[1])
+        weights = np.ones_like(inp_sel, dtype=float)
+        valid_idx = mapped_indices >= 0
+        weights[valid_idx] = bin_weights[mapped_indices[valid_idx]]
+
+        weights /= np.sum(weights)
+        weights_all[:, g] = weights
+
+    # Reshape output to match original input shape
+    if G == 1:
+        weights_all = weights_all[:, 0]
+    weights_all = weights_all.reshape(inp_shape)
+    if weights_all.shape != orig_shape:
+        weights_all = weights_all.reshape(orig_shape)
+    return weights_all
+
+
+
+def OptSample(inp, bin_sizes=None, select=0.1, n_samples=50, random_state=None):
+    """
+    Optimal sampling that balances bin proportions across multiple bin dimensions.
+    
+    Parameters:
+    -----------
+    inp : array-like
+        Input array of shape (N,) or (N, B) or (N, B, 1, 1, ...) where N is observations and B is bin dimensions
+    bin_sizes : array-like or list of arrays, optional
+        Bin sizes for density correction. If inp is (N, B), must be list of B arrays.
+    select : float or int
+        Proportion (if < 1) or number (if >= 1) of samples to select
+    n_samples : int
+        Number of random samples to evaluate
+    random_state : int, optional
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    selected_indices : ndarray
+        Indices of optimally selected observations
+    """
+    if random_state is not None:
+        np.random.seed(random_state)
+    
+    inp = np.asarray(inp)
+    
+    # Squeeze to 2D if shape has extra dimensions of size 1
+    if inp.ndim > 2:
+        inp = inp.squeeze()
+        # If still more than 2D after squeeze, reshape to 2D keeping first two dims
+        if inp.ndim > 2:
+            new_shape = (inp.shape[0], np.prod(inp.shape[1:]))
+            inp = inp.reshape(new_shape)
+    
+    # Ensure 2D: (N, B)
+    if inp.ndim == 1:
+        inp = inp.reshape(-1, 1)
+    
+    N, B = inp.shape
+    
+    # Determine sample size
+    sample_size = int(np.round(N * select)) if select < 1 else int(select)
+    sample_size = min(sample_size, N)
+    
+    # Prepare bin_sizes
+    if bin_sizes is not None:
+        if not isinstance(bin_sizes, list):
+            bin_sizes = [bin_sizes]
+        if len(bin_sizes) != B:
+            raise ValueError(f"bin_sizes length ({len(bin_sizes)}) must match B ({B})")
+    else:
+        bin_sizes = [None] * B
+    
+    # Step 2 & 3: Compute combined weights across all B dimensions (vectorized)
+    combined_weights = np.ones(N, dtype=float)
+    for b in range(B):
+        weights_b = BinWeights(inp[:, b], bin_sizes=bin_sizes[b], mode='recip')
+        combined_weights *= weights_b
+    combined_weights /= combined_weights.sum()
+    
+    # Step 6: Pre-compute optimal proportions for each B (do once, not per sample)
+    optimal_props = []
+    unis = []
+    for b in range(B):
+        inp_b = inp[:, b]
+        bs_b = bin_sizes[b]
+        
+        if bs_b is not None:
+            bs_b = np.asarray(bs_b)
+            valid = ~np.isnan(bs_b)
+            uni_b = np.arange(len(bs_b))
+            opt_prop = np.zeros_like(bs_b, dtype=float)
+            opt_prop[valid] = 1.0 / bs_b[valid]
+            opt_prop /= opt_prop.sum()
+        else:
+            uni_b = np.unique(inp_b)
+            opt_prop = np.ones(len(uni_b), dtype=float) / len(uni_b)
+        
+        optimal_props.append(opt_prop)
+        unis.append(uni_b)
+    
+    # Step 4, 5, 7 & 8: Generate samples and score them
+    best_score = np.inf
+    best_sample = None
+    
+    for _ in range(n_samples):
+        # Sample
+        sampled_idx = np.random.choice(N, size=sample_size, replace=False, p=combined_weights)
+        
+        # Score this sample across all B dimensions
+        scores_b = []
+        for b in range(B):
+            inp_b = inp[:, b]
+            bs_b = bin_sizes[b]
+            uni_b = unis[b]
+            
+            # Get bin counts for sample (use fast BinCount)
+            sample_props = BinCount(inp_b[sampled_idx], uni=uni_b, multi=False, 
+                                   prop=True, bin_sizes=bs_b)
+            
+            opt_prop = optimal_props[b]
+            
+            # Ensure same length
+            if len(sample_props) != len(opt_prop):
+                sample_props_full = np.zeros_like(opt_prop)
+                min_len = min(len(sample_props), len(opt_prop))
+                sample_props_full[:min_len] = sample_props[:min_len]
+                sample_props = sample_props_full
+            
+            # Compute weighted absolute relative error (use existing function)
+            weights_score = np.ones_like(opt_prop)
+            score = absrel_weighted(sample_props, opt_prop, weights_score)
+            scores_b.append(score)
+        
+        # Average score across B dimensions
+        avg_score = np.mean(scores_b)
+        
+        # Keep best sample
+        if avg_score < best_score:
+            best_score = avg_score
+            best_sample = sampled_idx
+    
+    return best_sample
+
+
+
+
+
+def DA_AError(inp1, inp2, weights = None, 
+              
+              bind = None, bw_mode = 'recip', bin_sizes = None,
+
+              mean = True, rel = False, 
+           expo = 2, root = False, weightbefore = False): 
+    
+    ''' 
+    Weights is a placeholder here 
+    inp2 is the y_true
+    
+    '''
+    
+    # DENSITY AWARE ABSOLUTE ERROR 
+    
+    #added revbase and revpseudo to reverse log transformations.
+    #Applies to both inputs. 
+
+    weights = BinWeights(bind, bin_sizes = bin_sizes, mode = bw_mode)
+
+    if expo != 2: root = False
+    w = mex.WeightsAdjuster(inp1, weights)
+
+    rr = inp2 if rel else 1
+
+    e = abs((inp1-inp2) / rr) #RELATIVE ERROR 
+
+    if weightbefore: w = w **expo
+    
+    AE = w * (e ** expo)
+    
+    if mean == True:
+        if isinstance(w, int) == False: AE = AE.sum() / w.sum()
+        else: AE = AE.mean()
+
+        if root: AE = AE**(1/2)
+
+    return AE
+
+
+def EBS_allocations(y_bin, sample_size=1000, n_bins=250):
+    '''EBS = Exhaustive Balanced Sampling '''
+
+    counts = np.bincount(y_bin, minlength=n_bins)
+    remaining_quota = sample_size
+    remaining_bins = np.arange(n_bins)
+    allocations = np.zeros(n_bins, dtype=int)
+
+    while remaining_quota > 0 and len(remaining_bins) > 0:
+        EBS = remaining_quota // len(remaining_bins)
+        if EBS == 0:
+            for b in remaining_bins[:remaining_quota]:
+                allocations[b] += 1
+            break
+        alloc = np.minimum(EBS, counts[remaining_bins])
+        allocations[remaining_bins] += alloc
+        remaining_quota -= alloc.sum()
+        exhausted = alloc == counts[remaining_bins]
+        remaining_bins = remaining_bins[~exhausted]
+    return allocations
+
+def EBS_sample(y_bin, sample_size=1000, n_bins=250, random_state=None, obs_weight=None):
+    '''EBS = Exhaustive Balanced Sampling with optional observation weights'''
+    rng = np.random.default_rng(random_state)
+    allocations = EBS_allocations(y_bin, sample_size, n_bins)
+    bin_indices = [np.where(y_bin == b)[0] for b in range(n_bins)]
+    sampled = []
+    for b in range(n_bins):
+        n = allocations[b]
+        idx = bin_indices[b]
+        if n > 0 and len(idx) > 0:
+            if n > len(idx):
+                # This should not happen, but if it does, fix allocation
+                n = len(idx)
+            if obs_weight is not None:
+                w = obs_weight[idx]
+                w = w / w.sum() if w.sum() > 0 else np.ones_like(w) / len(w)
+                chosen = rng.choice(idx, size=n, replace=False, p=w)
+            else:
+                chosen = rng.choice(idx, size=n, replace=False)
+            sampled.append(chosen)
+    return np.concatenate(sampled)
 
 
 
@@ -883,6 +1708,39 @@ def BinWeighter(bind, onlyidx = None, byaxis = None,
 
 
 
+#==========================================
+
+
+def HarpoonOverlapping(window_belong, select, repeat=1):
+    """
+    Round robin sampling for overlapping bins (window_belong: (N, max_bins), -1 for unused).
+    Each sample can only be selected once, even if it belongs to multiple bins.
+    Returns indices sampled without replacement.
+    """
+    window_belong = np.asarray(window_belong)
+    N = window_belong.shape[0]
+    num_bins = int(window_belong.max()) + 1 if np.any(window_belong != -1) else 0
+
+    if select < 1:
+        select = int(np.round(N * select))
+
+    all_selected = []
+    for _ in range(repeat):
+        selected_mask = np.zeros(N, dtype=int)
+        selected_count = 0
+        while selected_count < select:
+            for bin_idx in np.random.permutation(np.arange(num_bins)):
+                # Find indices where not yet selected and belongs to this bin
+                belongs = (window_belong == bin_idx).any(axis=1)
+                candidates = np.where((selected_mask == 0) & belongs)[0]
+                if len(candidates) > 0:
+                    pick = np.random.choice(candidates, 1, replace=False)[0]
+                    selected_mask[pick] = 1
+                    selected_count += 1
+                    if selected_count == select:
+                        break
+        all_selected.append(np.where(selected_mask == 1)[0])
+    return all_selected[0] if repeat == 1 else all_selected
 
 
 
