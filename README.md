@@ -1,10 +1,23 @@
 # Binmeths
 
-This package implements methods explored in the [Binning Methods paper](https://doi.org/).
-poseigen_binmeths is the binning and split-generation package in the Poseigen family.
-It provides utilities for bin construction, bin statistics, balanced sampling, and train/validation/test split strategies used across Poseigen workflows.
+[![PyPI version](https://img.shields.io/pypi/v/poseigen_binmeths)](https://pypi.org/project/poseigen_binmeths/)
+[![Python versions](https://img.shields.io/pypi/pyversions/poseigen_binmeths)](https://pypi.org/project/poseigen_binmeths/)
+[![License](https://img.shields.io/pypi/l/poseigen_binmeths)](https://pypi.org/project/poseigen_binmeths/)
+[![bioRxiv preprint](https://img.shields.io/badge/preprint-bioRxiv-B31B1B)](https://www.biorxiv.org/content/10.1101/2025.06.26.66188)
 
-## Features
+`poseigen_binmeths` is the binning and split-generation package in the [Poseigen ecosystem](https://github.com/Husam94/poseigen). It provides utilities for bin construction, bin statistics, balanced sampling, and train/validation/test split strategies used across Poseigen workflows.
+
+See the [Binning Methods preprint](https://www.biorxiv.org/content/10.1101/2025.06.26.66188) for the methods implemented here.
+
+## Installation
+
+Requires Python 3.12 or newer. Install from PyPI:
+
+```bash
+python -m pip install poseigen_binmeths
+```
+
+## Package
 
 poseigen_binmeths is organized into three modules:
 
@@ -12,25 +25,17 @@ poseigen_binmeths is organized into three modules:
 - split_utils: split generation utilities including random, window, stratified, and akin-based scoring/split selection methods.
 - harpoon: balanced per-bin samplers including NumPy and PyTorch implementations, plus overlapping-bin sampling helpers.
 
-Find Epoch Sampling [poseigen_trident](https://github.com/Husam94/poseigen_trident). 
+For epoch-sampling integrations, see [poseigen_trident](https://github.com/Husam94/poseigen_trident).
 
-Binning methods are used in the following case studies: 
-- [Synthetic Right-skewed Data](https://github.com/Husam94/CS-Synth)
-- [CTCF-DNA Interactions](https://github.com/Husam94/CS-CTCF)
-- [YY1-DNA Interactions](https://github.com/Husam94/CS-YY1)
-- [Enhancer Activity](https://github.com/Husam94/CS-EnhAct)
+## Case studies
 
+- **Synthetic data**
+  - [Synthetic right-skewed data](https://github.com/Husam94/CS-Synth)
+- **Genomic applications**
+  - [CTCF-DNA interactions](https://github.com/Husam94/CS-CTCF)
+  - [YY1-DNA interactions](https://github.com/Husam94/CS-YY1)
+  - [Enhancer activity](https://github.com/Husam94/CS-EnhAct)
 
-
-## Installation
-
-Install from PyPI:
-
-```bash
-pip install poseigen_binmeths
-```
-
-For local development, install from source using your preferred editable-install workflow.
 
 ## Usage
 
@@ -59,16 +64,3 @@ x = np.random.randn(1000)
 bind = bu.HistBinning(x, bins=20)
 train_idx, test_idx = su.SplitGen_Random(len(bind), proportions=[0.8, 0.2])
 ```
-
-## Project Status
-
-poseigen_binmeths is in active development and is intended to support binning and sampling workflows across the Poseigen ecosystem.
-
-## Related Projects
-
-- poseigen_seaside: shared utilities and metrics foundation.
-- poseigen_trident: model training workflows, including epoch sampling integrations.
-
-## License
-
-This project is released under the MIT License.
