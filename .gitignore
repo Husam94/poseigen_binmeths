@@ -7,6 +7,10 @@ dist/
 build/
 *.egg-info/
 
+# Generated figures and analysis notebook
+/Figs.Binning_Methods.ipynb
+/right_skewed.svg
+
 # Virtual environments
 .venv/
 venv/
